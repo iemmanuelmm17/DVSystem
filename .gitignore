@@ -1,0 +1,4 @@
+.env
+private/.env
+private/state/
+private/logs/
