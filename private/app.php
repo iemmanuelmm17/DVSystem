@@ -53,10 +53,17 @@ function gather(array $c, string $id, string $text, int $digits = 1): string {
     return '<Gather input="dtmf" numDigits="'.$digits.'" timeout="'.bounded($c,'INPUT_TIMEOUT_SECONDS',6,1,60).'" digitEndTimeout="'.bounded($c,'INTERDIGIT_TIMEOUT_SECONDS',5,1,30).'" action="'.esc(callback($c,$id)).'">'.say($c,$text).'</Gather>';
 }
 function outputXml(string $body): void { header('Content-Type: application/xml; charset=utf-8'); header('Cache-Control: no-store'); echo '<?xml version="1.0" encoding="UTF-8"?><Response>'.$body.'</Response>'; }
+function sipDestination(string $destination, string $domain): ?string {
+    // Restrict both parts to dial-plan-safe identifiers; never accept a full SIP URI.
+    if (!preg_match('/^[A-Za-z0-9_+*#-]{1,64}$/D', $destination)) return null;
+    if (!preg_match('/^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/D', $domain) || str_contains($domain, '..')) return null;
+    return 'sip:'.$destination.'@'.$domain;
+}
 function endCall(array $c, array &$s, string $message, bool $transfer = false): string {
     if (!empty($s['session'])) { api($c, 'DELETE', '/session', null, $s['session']); unset($s['session']); }
     $s['ended'] = true;
-    if ($transfer && !empty($c['OFFICE_DESTINATION'])) return say($c,$message).' <Forward>'.esc($c['OFFICE_DESTINATION']).'</Forward>';
+    $destination = $s['office_destination'] ?? ($c['OFFICE_DESTINATION'] ?? '');
+    if ($transfer && $destination !== '') return say($c,$message).' <Forward>'.esc($destination).'</Forward>';
     return say($c, $message.($transfer ? ' Please contact the office for assistance.' : '')).'<Hangup/>';
 }
 function failApi(array $c, array &$s, array $result): string {
@@ -82,6 +89,11 @@ function processCall(array $c, string $id, array &$s, array $request): string {
     if ($step !== 'start' && $digit === '9' && !in_array($step,['code','phone'],true)) return endCall($c,$s,'Goodbye.');
     switch ($step) {
         case 'start':
+            if (isset($request['destination'])) {
+                $destination = sipDestination((string)$request['destination'], (string)($request['AccountDomain'] ?? ''));
+                if ($destination === null) return endCall($c,$s,'The office transfer destination is not configured correctly.');
+                $s['office_destination'] = $destination;
+            }
             $phone = preg_replace('/\D/', '', (string)($request['NmsAni'] ?? ''));
             if (strlen($phone) < 10 || strlen($phone) > 11) return endCall($c,$s,'We could not identify your phone number.',true);
             $s['phone']=$phone;
