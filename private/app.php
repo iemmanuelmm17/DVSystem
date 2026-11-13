@@ -75,7 +75,19 @@ function failApi(array $c, array &$s, array $result): string {
 }
 function mainMenu(array $c, string $id, array &$s, string $prefix = ''): string {
     $s['step']='menu'; $s['attempts']=0; $s['digits']=1;
-    $s['prompt']=$prefix.' Press 1 to hear your subscriptions. Press 2 for the office. Press 3 to hear your saved cards. Press 4 to hear your account details. Press 9 to end the call.';
+    $s['prompt']=$prefix.' Press 1 to hear your subscriptions. Press 2 for the office. Press 3 to review or delete saved cards. Press 4 to hear your account details. Press 9 to end the call.';
+    return gather($c,$id,$s['prompt']);
+}
+function cardMenu(array $c, string $id, array &$s, string $purpose): string {
+    $r=api($c,'GET','/customers/'.(int)$s['customer'].'/cards',null,$s['session']);
+    if ($r['status'] !== 200) return failApi($c,$s,$r);
+    $cards=$r['data'] ?? [];
+    if (!$cards) return mainMenu($c,$id,$s,'You have no saved cards. To add one, contact the office.');
+    if (count($cards)>8) return endCall($c,$s,'There are too many cards to list. Please hold for the office.',true);
+    $s['cards']=$cards; $s['card_purpose']=$purpose; $s['step']='select_card'; $s['attempts']=0;
+    $parts=[];
+    foreach ($cards as $i=>$card) $parts[]='Press '.($i+1).' for '.($card['type'] ?? 'card').' ending in '.spokenPhone((string)($card['last_four'] ?? ''),'words').', expires '.($card['expires'] ?? 'unknown').(!empty($card['expired'])?', expired':'').'.';
+    $s['prompt']=implode(' ', $parts).' Press 9 to end the call.';
     return gather($c,$id,$s['prompt']);
 }
 function processCall(array $c, string $id, array &$s, array $request, ?callable $checkpoint = null): string {
@@ -132,13 +144,7 @@ function processCall(array $c, string $id, array &$s, array $request, ?callable 
             $s['customer']=$s['customers'][$i]['id']; return mainMenu($c,$id,$s);
         case 'menu':
             if ($digit === '2') return endCall($c,$s,'Please hold for the office.',true);
-            if ($digit === '3') {
-                $r=api($c,'GET','/customers/'.(int)$s['customer'].'/cards',null,$s['session']);
-                if ($r['status'] !== 200) return failApi($c,$s,$r);
-                $cards=$r['data'] ?? []; if (!$cards) return mainMenu($c,$id,$s,'You have no saved cards.');
-                $parts=[]; foreach ($cards as $card) $parts[]=($card['type'] ?? 'Card').' ending in '.spokenPhone((string)($card['last_four'] ?? ''),'words').', expires '.($card['expires'] ?? 'unknown').(!empty($card['expired'])?', expired':'').'.';
-                return mainMenu($c,$id,$s,implode(' ', $parts));
-            }
+            if ($digit === '3') return cardMenu($c,$id,$s,'delete');
             if ($digit === '4') {
                 $r=api($c,'GET','/customers/'.(int)$s['customer'],null,$s['session']);
                 if ($r['status'] !== 200) return failApi($c,$s,$r);
@@ -158,9 +164,10 @@ function processCall(array $c, string $id, array &$s, array $request, ?callable 
             $i=(int)$digit-1; if (!ctype_digit($digit) || !isset($s['subscriptions'][$i])) break;
             $sub=$s['subscriptions'][$i]; $s['subscription']=$sub['id'];
             $s['step']='subscription_menu'; $s['attempts']=0;
-            $s['prompt']='This subscription is '.($sub['status'] ?? 'unknown').'. It ends '.($sub['end'] ?? 'on an unavailable date').'. Auto renew is '.(!empty($sub['auto_renew'])?'on':'off').'. Press 1 to change auto renew. Press 2 for the office. Press 3 for the main menu. Press 4 to get a renewal quote. Press 9 to end the call.';
+            $s['prompt']='This subscription is '.($sub['status'] ?? 'unknown').'. It ends '.($sub['end'] ?? 'on an unavailable date').'. Auto renew is '.(!empty($sub['auto_renew'])?'on':'off').'. Press 1 to change auto renew. Press 2 for the office. Press 3 for the main menu. Press 4 to get a renewal quote. Press 5 to change the saved card on this subscription. Press 9 to end the call.';
             return gather($c,$id,$s['prompt']);
         case 'subscription_menu':
+            if ($digit === '5') return cardMenu($c,$id,$s,'subscription');
             if ($digit === '2') return endCall($c,$s,'Please hold for the office.',true);
             if ($digit === '3') return mainMenu($c,$id,$s);
             if ($digit === '4') {
@@ -177,6 +184,26 @@ function processCall(array $c, string $id, array &$s, array $request, ?callable 
             if ($digit !== '1') break;
             $s['step']='auto_renew'; $s['attempts']=0; $s['prompt']='Press 1 to turn auto renew on. Press 2 to turn it off. Press 3 to go back. Press 9 to end the call.';
             return gather($c,$id,$s['prompt']);
+        case 'select_card':
+            $i=(int)$digit-1;
+            if (!ctype_digit($digit) || !isset($s['cards'][$i])) break;
+            $s['selected_card']=$s['cards'][$i];
+            $s['step']='confirm_card'; $s['attempts']=0;
+            $desc=($s['selected_card']['type'] ?? 'card').' ending in '.spokenPhone((string)($s['selected_card']['last_four'] ?? ''),'words');
+            $s['prompt']=($s['card_purpose'] === 'delete' ? 'To delete the saved '.$desc : 'To use '.$desc.' for this subscription').', press 1. To cancel, press 2.';
+            return gather($c,$id,$s['prompt']);
+        case 'confirm_card':
+            if ($digit === '2') return mainMenu($c,$id,$s,'No change was made.');
+            if ($digit !== '1') break;
+            if ($s['card_purpose'] === 'delete') {
+                $r=api($c,'DELETE','/customers/'.(int)$s['customer'].'/cards/'.(int)$s['selected_card']['id'],null,$s['session']);
+                if (($r['error']['code'] ?? '') === 'card_in_use') return mainMenu($c,$id,$s,'That card is still used by a subscription and cannot be deleted.');
+                if ($r['status'] !== 200 || empty($r['data']['deleted'])) return failApi($c,$s,$r);
+                return mainMenu($c,$id,$s,'The card was deleted.');
+            }
+            $r=api($c,'PUT','/customers/'.(int)$s['customer'].'/subscriptions/'.(int)$s['subscription'].'/card',['card_id'=>$s['selected_card']['id']],$s['session']);
+            if ($r['status'] !== 200) return failApi($c,$s,$r);
+            return mainMenu($c,$id,$s,'The subscription card was changed.');
         case 'renew_auto':
             if ($digit === '3') return mainMenu($c,$id,$s,'No charge was made.');
             if ($digit !== '1' && $digit !== '2') break;

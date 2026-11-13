@@ -26,4 +26,9 @@ check($s['step'] === 'menu' && str_contains($xml, 'No charge was made'), 'cancel
 $s=['step'=>'renew_confirm','renewal_quote'=>['price'=>399], 'renew_auto'=>false];
 $xml=processCall($c,'abc',$s,['Digits'=>'1']);
 check($s['ended'] && str_contains($xml, 'cannot be processed safely'), 'no charge without durable checkpoint');
+$s=['step'=>'select_card','cards'=>[['id'=>7,'type'=>'visa','last_four'=>'1234']],'card_purpose'=>'delete'];
+$xml=processCall($c,'abc',$s,['Digits'=>'1']);
+check($s['step']==='confirm_card' && str_contains($xml,'delete the saved'), 'card deletion confirmation');
+$xml=processCall($c,'abc',$s,['Digits'=>'2']);
+check($s['step']==='menu' && str_contains($xml,'No change was made'), 'cancel card change');
 echo "Smoke tests passed\n";

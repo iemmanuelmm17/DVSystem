@@ -1,6 +1,6 @@
 # DVSystem: NetSapiens Web Responder
 
-A PHP server-side IVR for the Dee Voch Phone API. This incomplete version handles caller lookup, SMS-code verification, shared-number account selection, subscription and saved-card review, basic account details, confirmed auto-renew changes, and an optional saved-card renewal flow. Renewals are disabled by default. The caller can transfer to the office; new signups, new subscriptions, card changes, addresses, email verification, speech input and other free-text changes are **not implemented** and require the office. Caller ID is not treated as verification. Calls with more than eight accounts or subscriptions are transferred rather than truncated. No card data is collected.
+A PHP server-side IVR for the Dee Voch Phone API. This incomplete version handles caller lookup, SMS-code verification, shared-number account selection, subscription and saved-card review, confirmed saved-card deletion and subscription card selection, basic account details, confirmed auto-renew changes, and an optional saved-card renewal flow. Renewals are disabled by default. The caller can transfer to the office; new signups, new subscriptions, new-card collection, addresses, email verification, speech input and other free-text changes are **not implemented** and require the office. Caller ID is not treated as verification. Calls with more than eight accounts or subscriptions are transferred rather than truncated. No card data is collected.
 
 ## Windows deployment
 
