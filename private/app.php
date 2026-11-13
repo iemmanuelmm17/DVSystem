@@ -12,7 +12,7 @@ function config(): array {
             $c[trim($key)] = trim(trim($value), "\"'");
         }
     }
-    foreach (['DV_API_BASE_URL','DV_API_KEY','WEBRESPONDER_KEY','WEBRESPONDER_URL','OFFICE_DESTINATION','STATE_DIR','LOG_DIR','CALLER_ID_DIGIT_STYLE','TTS_VOICE','TTS_LANGUAGE','INPUT_TIMEOUT_SECONDS','INTERDIGIT_TIMEOUT_SECONDS','MAX_ATTEMPTS','LOG_LEVEL','LOG_RETENTION_DAYS'] as $key) {
+    foreach (['DV_API_BASE_URL','DV_API_KEY','ENABLE_RENEWALS','WEBRESPONDER_KEY','WEBRESPONDER_URL','OFFICE_DESTINATION','STATE_DIR','LOG_DIR','CALLER_ID_DIGIT_STYLE','TTS_VOICE','TTS_LANGUAGE','INPUT_TIMEOUT_SECONDS','INTERDIGIT_TIMEOUT_SECONDS','MAX_ATTEMPTS','LOG_LEVEL','LOG_RETENTION_DAYS'] as $key) {
         $value = getenv($key); if ($value !== false) $c[$key] = $value;
     }
     return $c + ['DV_API_BASE_URL'=>'https://dev.deevoch.com/api/phone/v1','CALLER_ID_DIGIT_STYLE'=>'words','INPUT_TIMEOUT_SECONDS'=>'6','INTERDIGIT_TIMEOUT_SECONDS'=>'5','MAX_ATTEMPTS'=>'3','LOG_LEVEL'=>'info','LOG_RETENTION_DAYS'=>'30'];
@@ -28,10 +28,11 @@ function logEvent(array $c, string $level, string $message): void {
     $days = bounded($c, 'LOG_RETENTION_DAYS', 30, 0, 36500);
     if ($days > 0) foreach (glob($dir.'/*.log') ?: [] as $file) if (preg_match('/^\d{4}-\d{2}-\d{2}\.log$/', basename($file)) && filemtime($file) < time()-$days*86400) @unlink($file);
 }
-function api(array $c, string $method, string $path, ?array $body = null, ?string $session = null): array {
+function api(array $c, string $method, string $path, ?array $body = null, ?string $session = null, ?string $idempotencyKey = null): array {
     $ch = curl_init(rtrim($c['DV_API_BASE_URL'], '/').$path);
     $headers = ['Authorization: Bearer '.$c['DV_API_KEY'], 'Accept: application/json', 'Content-Type: application/json'];
     if ($session !== null) $headers[] = 'X-Session-Token: '.$session;
+    if ($idempotencyKey !== null) $headers[] = 'Idempotency-Key: '.$idempotencyKey;
     curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER=>true, CURLOPT_CUSTOMREQUEST=>$method, CURLOPT_HTTPHEADER=>$headers, CURLOPT_CONNECTTIMEOUT=>5, CURLOPT_TIMEOUT=>15, CURLOPT_FOLLOWLOCATION=>false]);
     if ($body !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body, JSON_THROW_ON_ERROR));
     $raw = curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); curl_close($ch);
@@ -74,10 +75,10 @@ function failApi(array $c, array &$s, array $result): string {
 }
 function mainMenu(array $c, string $id, array &$s, string $prefix = ''): string {
     $s['step']='menu'; $s['attempts']=0; $s['digits']=1;
-    $s['prompt']=$prefix.' Press 1 to hear your subscriptions. Press 2 for the office. Press 9 to end the call.';
+    $s['prompt']=$prefix.' Press 1 to hear your subscriptions. Press 2 for the office. Press 3 to hear your saved cards. Press 4 to hear your account details. Press 9 to end the call.';
     return gather($c,$id,$s['prompt']);
 }
-function processCall(array $c, string $id, array &$s, array $request): string {
+function processCall(array $c, string $id, array &$s, array $request, ?callable $checkpoint = null): string {
     $digit = (string)($request['Digits'] ?? '');
     $step = $s['step'] ?? 'start';
     if (!empty($s['ended'])) return '<Hangup/>';
@@ -131,6 +132,19 @@ function processCall(array $c, string $id, array &$s, array $request): string {
             $s['customer']=$s['customers'][$i]['id']; return mainMenu($c,$id,$s);
         case 'menu':
             if ($digit === '2') return endCall($c,$s,'Please hold for the office.',true);
+            if ($digit === '3') {
+                $r=api($c,'GET','/customers/'.(int)$s['customer'].'/cards',null,$s['session']);
+                if ($r['status'] !== 200) return failApi($c,$s,$r);
+                $cards=$r['data'] ?? []; if (!$cards) return mainMenu($c,$id,$s,'You have no saved cards.');
+                $parts=[]; foreach ($cards as $card) $parts[]=($card['type'] ?? 'Card').' ending in '.spokenPhone((string)($card['last_four'] ?? ''),'words').', expires '.($card['expires'] ?? 'unknown').(!empty($card['expired'])?', expired':'').'.';
+                return mainMenu($c,$id,$s,implode(' ', $parts));
+            }
+            if ($digit === '4') {
+                $r=api($c,'GET','/customers/'.(int)$s['customer'],null,$s['session']);
+                if ($r['status'] !== 200) return failApi($c,$s,$r);
+                $profile=$r['data'];
+                return mainMenu($c,$id,$s,'The account is under '.($profile['name'] ?? 'unknown').'. The telephone number is '.spokenPhone((string)($profile['phone'] ?? ''),$c['CALLER_ID_DIGIT_STYLE']).'. For changes or other details, please contact the office.');
+            }
             if ($digit !== '1') break;
             $r=api($c,'GET','/customers/'.(int)$s['customer'].'/subscriptions',null,$s['session']);
             if ($r['status'] !== 200) return failApi($c,$s,$r);
@@ -144,14 +158,53 @@ function processCall(array $c, string $id, array &$s, array $request): string {
             $i=(int)$digit-1; if (!ctype_digit($digit) || !isset($s['subscriptions'][$i])) break;
             $sub=$s['subscriptions'][$i]; $s['subscription']=$sub['id'];
             $s['step']='subscription_menu'; $s['attempts']=0;
-            $s['prompt']='This subscription is '.($sub['status'] ?? 'unknown').'. It ends '.($sub['end'] ?? 'on an unavailable date').'. Auto renew is '.(!empty($sub['auto_renew'])?'on':'off').'. Press 1 to change auto renew. Press 2 for the office. Press 3 for the main menu. Press 9 to end the call.';
+            $s['prompt']='This subscription is '.($sub['status'] ?? 'unknown').'. It ends '.($sub['end'] ?? 'on an unavailable date').'. Auto renew is '.(!empty($sub['auto_renew'])?'on':'off').'. Press 1 to change auto renew. Press 2 for the office. Press 3 for the main menu. Press 4 to get a renewal quote. Press 9 to end the call.';
             return gather($c,$id,$s['prompt']);
         case 'subscription_menu':
             if ($digit === '2') return endCall($c,$s,'Please hold for the office.',true);
             if ($digit === '3') return mainMenu($c,$id,$s);
+            if ($digit === '4') {
+                if (strtolower($c['ENABLE_RENEWALS'] ?? 'false') !== 'true') return endCall($c,$s,'Renewals are not available through this system. Please hold for the office.',true);
+                $r=api($c,'GET','/customers/'.(int)$s['customer'].'/subscriptions/'.(int)$s['subscription'].'/renewal',null,$s['session']);
+                if ($r['status'] !== 200) return failApi($c,$s,$r);
+                $quote=$r['data'] ?? [];
+                if (!isset($quote['price'], $quote['currency'], $quote['start'], $quote['end'], $quote['card']['last_four']) || !is_numeric($quote['price'])) return endCall($c,$s,'The renewal quote is incomplete.',true);
+                $s['renewal_quote']=$quote; $s['step']='renew_auto'; $s['attempts']=0;
+                $warnings=implode(' ',array_filter($quote['warnings'] ?? [],'is_string'));
+                $s['prompt']='Renewal costs '.$quote['price'].' '.$quote['currency'].', from '.$quote['start'].' until '.$quote['end'].'. '.$warnings.' Press 1 to renew with auto renew on. Press 2 to renew with auto renew off. Press 3 to cancel.';
+                return gather($c,$id,$s['prompt']);
+            }
             if ($digit !== '1') break;
             $s['step']='auto_renew'; $s['attempts']=0; $s['prompt']='Press 1 to turn auto renew on. Press 2 to turn it off. Press 3 to go back. Press 9 to end the call.';
             return gather($c,$id,$s['prompt']);
+        case 'renew_auto':
+            if ($digit === '3') return mainMenu($c,$id,$s,'No charge was made.');
+            if ($digit !== '1' && $digit !== '2') break;
+            $s['renew_auto']=$digit === '1'; $s['step']='renew_confirm'; $s['attempts']=0;
+            $q=$s['renewal_quote']; $card=$q['card'] ?? [];
+            $s['prompt']='Confirm a charge of '.$q['price'].' '.$q['currency'].' to the card ending in '.spokenPhone((string)($card['last_four'] ?? ''),'words').', for '.$q['start'].' through '.$q['end'].', with auto renew '.($s['renew_auto']?'on':'off').'. Press 1 to authorize the charge. Press 2 to cancel.';
+            return gather($c,$id,$s['prompt']);
+        case 'renew_confirm':
+            if ($digit === '2') return mainMenu($c,$id,$s,'No charge was made.');
+            if ($digit !== '1') break;
+            // Persist the attempt before contacting the API. A crash or ambiguous response
+            // must not invite a second charge under a fresh key.
+            if ($checkpoint === null) return endCall($c,$s,'The renewal cannot be processed safely.',true);
+            $s['renewal_key']=bin2hex(random_bytes(16)); $s['step']='renew_uncertain';
+            $checkpoint($s);
+            $r=api($c,'POST','/customers/'.(int)$s['customer'].'/subscriptions/'.(int)$s['subscription'].'/renew', ['expected_amount'=>$s['renewal_quote']['price'],'auto_renew'=>$s['renew_auto']],$s['session'],$s['renewal_key']);
+            if ($r['status'] === 200 || $r['status'] === 201) {
+                $end=$r['data']['subscription']['end'] ?? 'unavailable';
+                unset($s['renewal_key'], $s['renewal_quote']);
+                return mainMenu($c,$id,$s,'Your renewal was completed. The subscription ends '.$end.'.');
+            }
+            $code=$r['error']['code'] ?? '';
+            if ($code === 'price_changed') return endCall($c,$s,'The renewal price changed. No charge was made. Please contact the office for a new quote.',true);
+            if ($code === 'card_declined') return endCall($c,$s,'The card was declined. No renewal was made. Please hold for the office.',true);
+            // Includes transport failures, in-progress, server errors and charged_not_saved.
+            return endCall($c,$s,'The renewal result is uncertain. Do not try the charge again. Please contact the office to check the order.',true);
+        case 'renew_uncertain':
+            return endCall($c,$s,'The renewal result is uncertain. Do not try the charge again. Please contact the office to check the order.',true);
         case 'auto_renew':
             if ($digit === '3') return mainMenu($c,$id,$s);
             if ($digit !== '1' && $digit !== '2') break;
@@ -199,7 +252,15 @@ function run(): void {
         $raw=stream_get_contents($f); $s=$raw ? json_decode($raw,true) : [];
         if (!is_array($s)) throw new RuntimeException('Invalid state');
         if (!empty($s['updated']) && $s['updated'] < time()-1800) { $body=endCall($c,$s,'This call session has expired. Please call again.'); }
-        else { $body=processCall($c,$id,$s,$request); }
+        else {
+            $checkpoint = function(array $state) use ($f): void {
+                $state['updated']=time(); $encoded=json_encode($state, JSON_THROW_ON_ERROR);
+                rewind($f);
+                if (!ftruncate($f,0) || fwrite($f,$encoded) !== strlen($encoded) || !fflush($f)) throw new RuntimeException('Cannot persist call state');
+                if (function_exists('fsync') && !fsync($f)) throw new RuntimeException('Cannot sync call state');
+            };
+            $body=processCall($c,$id,$s,$request,$checkpoint);
+        }
         $s['updated']=time(); rewind($f); ftruncate($f,0); fwrite($f,json_encode($s,JSON_THROW_ON_ERROR)); fflush($f);
         logEvent($c,'debug','Web Responder request processed.');
         outputXml($body);

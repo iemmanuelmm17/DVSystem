@@ -1,6 +1,6 @@
 # DVSystem: NetSapiens Web Responder
 
-A PHP server-side IVR for the Dee Voch Phone API. This first version handles caller lookup, SMS-code verification, shared-number account selection, subscription review and confirmed auto-renew changes. The caller can transfer to the office; new signups, card/payment handling, renewals, addresses, email verification and other free-text changes are **not implemented** and require the office. Caller ID is not treated as verification. Calls with more than eight accounts or subscriptions are transferred rather than truncated. No card data is collected.
+A PHP server-side IVR for the Dee Voch Phone API. This incomplete version handles caller lookup, SMS-code verification, shared-number account selection, subscription and saved-card review, basic account details, confirmed auto-renew changes, and an optional saved-card renewal flow. Renewals are disabled by default. The caller can transfer to the office; new signups, new subscriptions, card changes, addresses, email verification, speech input and other free-text changes are **not implemented** and require the office. Caller ID is not treated as verification. Calls with more than eight accounts or subscriptions are transferred rather than truncated. No card data is collected.
 
 ## Windows deployment
 
@@ -14,11 +14,13 @@ State is stored server-side under random 256-bit IDs, with a 30-minute inactivit
 
 `CALLER_ID_DIGIT_STYLE`, `TTS_VOICE`, `TTS_LANGUAGE`, `INPUT_TIMEOUT_SECONDS`, `INTERDIGIT_TIMEOUT_SECONDS`, `MAX_ATTEMPTS`, `LOG_LEVEL` and `LOG_RETENTION_DAYS` are configured in the private `.env`. Logging intentionally records only fixed, non-sensitive events even at debug level, not raw requests or XML. No message is sent by this application; Dee Voch delivers verification codes. Dev SMS is disabled and card charges decline.
 
+Renewals require `ENABLE_RENEWALS=true`. Do not enable until end-to-end testing and approval: the dev API cannot successfully charge, and the PBX has not been tested. A renewal reads the quote, asks about auto-renew, then requires an explicit charge confirmation. A unique idempotency key and uncertain state are saved before the request. If the result is ambiguous, the caller is transferred to the office without an automatic retry; the office must check the order before any further attempt. This does not guarantee recovery after storage failure or across independent deployments.
+
 ## Open deployment decisions
 
 - Supply the office destination in the To-Web URL and confirm the system-user routing and TTS voice/language.
 - Confirm whether caller ID can be withheld or changed: this version transfers rather than accepting an alternate number, and supports SMS only. Landline/email verification transfers to the office.
-- A full signup, renewal, address and card-management IVR requires a defined secure payment collection solution, free-text workflow, and explicit caller-consent prompts. Avoid collecting card data or OTPs in recordings, transcripts, and logs; assess PCI obligations before adding payments.
+- The remaining signup, address and card-management IVR needs the speech workflow, secure payment procedures and explicit caller-consent prompts to be implemented and tested. Avoid collecting card data or OTPs in recordings, transcripts, and logs; assess PCI obligations before adding payments.
 - Confirm how the PBX behaves on a Gather timeout and whether it propagates the action URL query parameters. Callbacks should preserve `key` and `state` and supply `Digits`. Confirm TLS, inbound firewall restrictions, and log redaction end-to-end.
 
 Run `php tests/smoke.php` for basic helper and timeout checks. A real PBX and Dee Voch test account are needed for integration testing.
