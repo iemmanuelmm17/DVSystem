@@ -21,10 +21,11 @@ function esc(string $s): string { return htmlspecialchars($s, ENT_QUOTES | ENT_X
 function bounded(array $c, string $k, int $default, int $min, int $max): int { $v = filter_var($c[$k] ?? $default, FILTER_VALIDATE_INT); return $v === false ? $default : max($min, min($max, $v)); }
 function logEvent(array $c, string $level, string $message): void {
     $levels = ['error'=>0,'warning'=>1,'info'=>2,'debug'=>3];
-    if (($levels[$level] ?? 0) > ($levels[$c['LOG_LEVEL'] ?? 'info'] ?? 2) || empty($c['LOG_DIR'])) return;
+    if (($levels[$level] ?? 0) > ($levels[$c['LOG_LEVEL'] ?? 'info'] ?? 2)) return;
+    if (empty($c['LOG_DIR'])) { error_log('DVSystem: LOG_DIR is not configured.'); return; }
     $dir = $c['LOG_DIR']; if (!is_dir($dir)) @mkdir($dir, 0700, true);
     // Messages are fixed strings only, never request payloads, tokens or API responses.
-    @file_put_contents($dir.'/'.gmdate('Y-m-d').'.log', gmdate('c').' '.$level.' '.$message."\n", FILE_APPEND | LOCK_EX);
+    if (@file_put_contents($dir.'/'.gmdate('Y-m-d').'.log', gmdate('c').' '.$level.' '.$message."\n", FILE_APPEND | LOCK_EX) === false) error_log('DVSystem: could not write the private log; check LOG_DIR and PHP worker permissions.');
     $days = bounded($c, 'LOG_RETENTION_DAYS', 30, 0, 36500);
     if ($days > 0) foreach (glob($dir.'/*.log') ?: [] as $file) if (preg_match('/^\d{4}-\d{2}-\d{2}\.log$/', basename($file)) && filemtime($file) < time()-$days*86400) @unlink($file);
 }
@@ -35,9 +36,14 @@ function api(array $c, string $method, string $path, ?array $body = null, ?strin
     if ($idempotencyKey !== null) $headers[] = 'Idempotency-Key: '.$idempotencyKey;
     curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER=>true, CURLOPT_CUSTOMREQUEST=>$method, CURLOPT_HTTPHEADER=>$headers, CURLOPT_CONNECTTIMEOUT=>5, CURLOPT_TIMEOUT=>15, CURLOPT_FOLLOWLOCATION=>false]);
     if ($body !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body, JSON_THROW_ON_ERROR));
-    $raw = curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); curl_close($ch);
+    $raw = curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); $curlCode = curl_errno($ch); curl_close($ch);
     $decoded = is_string($raw) ? json_decode($raw, true) : null;
-    if (!is_array($decoded)) return ['status'=>0, 'error'=>['code'=>'server_error']];
+    // Only a fixed operation name and numeric status are logged, never URLs or data.
+    $operation = preg_match('~^/verifications/[^/]+/check$~D', $path) ? 'verification_check' : (in_array($path, ['/verifications','/callers/lookup'], true) ? ltrim(str_replace('/','_', $path),'_') : 'other');
+    if ($curlCode !== 0 || !is_array($decoded) || $status >= 400) {
+        logEvent($c,'warning','API '.$operation.' HTTP '.$status.' curl '.$curlCode.' JSON '.(is_array($decoded) ? 'valid' : 'invalid').'.');
+    }
+    if (!is_array($decoded)) return ['status'=>$status, 'error'=>['code'=>'server_error']];
     return ['status'=>$status] + $decoded;
 }
 function spokenPhone(string $phone, string $style): string {
@@ -79,7 +85,7 @@ function endCall(array $c, array &$s, string $message, bool $transfer = false): 
 }
 function failApi(array $c, array &$s, array $result): string {
     $code = $result['error']['code'] ?? 'server_error';
-    logEvent($c,'warning','API request failed: '.preg_replace('/[^a-z_]/', '', (string)$code));
+    logEvent($c,'warning','API request failed; HTTP '.(int)($result['status'] ?? 0).'; code '.(preg_match('/^[a-z_]{1,40}$/D', (string)$code) ? $code : 'unknown').'.');
     if ($code === 'session_required') return endCall($c,$s,'Your verification session has expired. Please call again to verify.');
     return endCall($c,$s,'Sorry, we cannot complete that request right now.',true);
 }
@@ -143,7 +149,10 @@ function processCall(array $c, string $id, array &$s, array $request, ?callable 
                 if ($s['attempts'] >= bounded($c,'MAX_ATTEMPTS',3,1,10)) return endCall($c,$s,'Too many attempts. Please call again.');
                 return gather($c,$id,'That code is not correct. '.$s['prompt'],6);
             }
-            if ($r['status'] !== 200) return failApi($c,$s,$r);
+            if (!in_array($r['status'], [200,201], true) || !is_string($r['data']['session_token'] ?? null) || ($r['data']['session_token'] ?? '') === '' || !is_array($r['data']['customers'] ?? null)) {
+                logEvent($c,'warning','Verification check did not return a valid session.');
+                return failApi($c,$s,$r);
+            }
             $s['session']=$r['data']['session_token']; $s['customers']=$r['data']['customers'] ?? []; unset($s['verification']);
             if (count($s['customers']) === 1) { $s['customer']=$s['customers'][0]['id']; return mainMenu($c,$id,$s); }
             if (count($s['customers']) === 0 || count($s['customers']) > 8) return endCall($c,$s,'Please hold for help selecting your account.',true);
