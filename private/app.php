@@ -57,10 +57,10 @@ function say(array $c, string $text): string {
 }
 function callback(array $c, string $id): string { return $c['WEBRESPONDER_URL'].'?'.http_build_query(['key'=>$c['WEBRESPONDER_KEY'],'state'=>$id], '', '&', PHP_QUERY_RFC3986); }
 function gather(array $c, string $id, string $text, int $digits = 1): string {
-    return '<Gather input="dtmf" numDigits="'.$digits.'" timeout="'.bounded($c,'INPUT_TIMEOUT_SECONDS',6,1,60).'" digitEndTimeout="'.bounded($c,'INTERDIGIT_TIMEOUT_SECONDS',5,1,30).'" action="'.esc(callback($c,$id)).'">'.say($c,$text.' Press star to repeat. Press pound to go back.').'</Gather>';
+    return '<Gather input="dtmf" numDigits="'.$digits.'" timeout="'.bounded($c,'INPUT_TIMEOUT_SECONDS',6,1,60).'" digitEndTimeout="'.bounded($c,'INTERDIGIT_TIMEOUT_SECONDS',5,1,30).'" action="'.esc(callback($c,$id)).'">'.say($c,$text.' Press star to repeat. Press 9 to go back.').'</Gather>';
 }
 function gatherSpeech(array $c, string $id, string $text): string {
-    return '<Gather input="dtmf speech" numDigits="1" language="en-US" timeout="'.bounded($c,'INPUT_TIMEOUT_SECONDS',6,1,60).'" action="'.esc(callback($c,$id)).'">'.say($c,$text.' Press star to repeat. Press pound to go back.').'</Gather>';
+    return '<Gather input="dtmf speech" numDigits="1" language="en-US" timeout="'.bounded($c,'INPUT_TIMEOUT_SECONDS',6,1,60).'" action="'.esc(callback($c,$id)).'">'.say($c,$text.' Press star to repeat. Press 9 to go back.').'</Gather>';
 }
 function beginChange(array $c, string $id, array &$s, string $target, string $field, string $label, bool $numeric = false): string {
     $s['change_target']=$target; $s['change_field']=$field; $s['change_label']=$label;
@@ -86,12 +86,13 @@ function endCall(array $c, array &$s, string $message, bool $transfer = false): 
 function failApi(array $c, array &$s, array $result): string {
     $code = $result['error']['code'] ?? 'server_error';
     logEvent($c,'warning','API request failed; HTTP '.(int)($result['status'] ?? 0).'; code '.(preg_match('/^[a-z_]{1,40}$/D', (string)$code) ? $code : 'unknown').'.');
+    if ($code === 'too_many_codes') return endCall($c,$s,'Too many verification codes were requested. Please wait 15 minutes before requesting another code, or contact the office.',true);
     if ($code === 'session_required') return endCall($c,$s,'Your verification session has expired. Please call again to verify.');
     return endCall($c,$s,'Sorry, we cannot complete that request right now.',true);
 }
 function mainMenu(array $c, string $id, array &$s, string $prefix = ''): string {
     $s['step']='menu'; $s['attempts']=0; $s['digits']=1;
-    $s['prompt']=$prefix.' Press 1 to hear your subscriptions. Press 2 for the office. Press 3 to review or delete saved cards. Press 4 to hear your account details. Press 5 to change account details. Press 9 to end the call.';
+    $s['prompt']=$prefix.' Press 1 to hear your subscriptions. Press 2 for the office. Press 3 to review or delete saved cards. Press 4 to hear your account details. Press 5 to change account details.';
     return gather($c,$id,$s['prompt']);
 }
 function cardMenu(array $c, string $id, array &$s, string $purpose): string {
@@ -103,7 +104,7 @@ function cardMenu(array $c, string $id, array &$s, string $purpose): string {
     $s['cards']=$cards; $s['card_purpose']=$purpose; $s['step']='select_card'; $s['attempts']=0;
     $parts=[];
     foreach ($cards as $i=>$card) $parts[]='Press '.($i+1).' for '.($card['type'] ?? 'card').' ending in '.spokenPhone((string)($card['last_four'] ?? ''),'words').', expires '.($card['expires'] ?? 'unknown').(!empty($card['expired'])?', expired':'').'.';
-    $s['prompt']=implode(' ', $parts).' Press 9 to end the call.';
+    $s['prompt']=implode(' ', $parts).'';
     return gather($c,$id,$s['prompt']);
 }
 function promptSnapshot(array $s): array {
@@ -117,7 +118,7 @@ function repeatPrompt(array $c, string $id, array &$s, string $prefix = ''): str
 }
 function processCall(array $c, string $id, array &$s, array $request, ?callable $checkpoint = null): string {
     $step=$s['step'] ?? 'start'; $digit=(string)($request['Digits'] ?? '');
-    if (empty($s['ended']) && $step !== 'start' && $step !== 'renew_uncertain' && ($digit === '*' || $digit === '#')) {
+    if (empty($s['ended']) && $step !== 'start' && $step !== 'renew_uncertain' && ($digit === '*' || $digit === '9')) {
         if ($digit === '*') return repeatPrompt($c,$id,$s);
         $history=$s['history'] ?? [];
         if (!$history) return repeatPrompt($c,$id,$s,'There is no previous menu. ');
@@ -150,7 +151,6 @@ function processCallCore(array $c, string $id, array &$s, array $request, ?calla
         if ($s['attempts'] >= bounded($c,'MAX_ATTEMPTS',3,1,10)) return endCall($c,$s,'We did not receive a response. Goodbye.');
         return ($step === 'change_input' && empty($s['change_numeric'])) ? gatherSpeech($c,$id,$s['prompt']) : gather($c,$id,$s['prompt'] ?? 'Please enter your selection.', (int)($s['digits'] ?? 1));
     }
-    if ($step !== 'start' && $digit === '9' && !in_array($step,['code','phone','change_input'],true)) return endCall($c,$s,'Goodbye.');
     switch ($step) {
         case 'start':
             if (isset($request['destination'])) {
@@ -191,7 +191,7 @@ function processCallCore(array $c, string $id, array &$s, array $request, ?calla
             if (count($s['customers']) === 1) { $s['customer']=$s['customers'][0]['id']; return mainMenu($c,$id,$s); }
             if (count($s['customers']) === 0 || count($s['customers']) > 8) return endCall($c,$s,'Please hold for help selecting your account.',true);
             $parts=[]; foreach ($s['customers'] as $i=>$customer) $parts[]='Press '.($i+1).' for '.$customer['name'].'.';
-            $s['step']='customer'; $s['digits']=1; $s['attempts']=0; $s['prompt']=implode(' ', $parts).' Press 9 to end the call.';
+            $s['step']='customer'; $s['digits']=1; $s['attempts']=0; $s['prompt']=implode(' ', $parts).'';
             return gather($c,$id,$s['prompt']);
         case 'customer':
             $i=(int)$digit-1; if (!ctype_digit($digit) || !isset($s['customers'][$i])) break;
@@ -200,7 +200,7 @@ function processCallCore(array $c, string $id, array &$s, array $request, ?calla
             if ($digit === '5') {
                 if (strtolower($c['ENABLE_ACCOUNT_CHANGES'] ?? 'false') !== 'true') return endCall($c,$s,'Account changes are not available through this system. Please hold for the office.',true);
                 $s['step']='profile_change'; $s['attempts']=0;
-                $s['prompt']='Press 1 to change your name. Press 2 to change your email. Press 3 to change your primary phone. Press 4 to change your secondary phone. Press 5 to turn the newsletter on. Press 6 to turn it off. Press 9 to end the call.';
+                $s['prompt']='Press 1 to change your name. Press 2 to change your email. Press 3 to change your primary phone. Press 4 to change your secondary phone. Press 5 to turn the newsletter on. Press 6 to turn it off.';
                 return gather($c,$id,$s['prompt']);
             }
             if ($digit === '2') return endCall($c,$s,'Please hold for the office.',true);
@@ -218,19 +218,19 @@ function processCallCore(array $c, string $id, array &$s, array $request, ?calla
             if (!$s['subscriptions']) return mainMenu($c,$id,$s,'There are no subscriptions on this account.');
             if (count($s['subscriptions']) > 8) return endCall($c,$s,'There are too many subscriptions to list here. Please hold for the office.',true);
             $parts=[]; foreach ($s['subscriptions'] as $i=>$sub) $parts[]='Press '.($i+1).' for '.($sub['plan']['name'] ?? 'subscription').', '.($sub['status'] ?? '').', delivery to '.($sub['delivery']['address_line_1'] ?? 'address unavailable').'.';
-            $s['step']='subscription'; $s['prompt']=implode(' ', $parts).' Press 9 to end the call.'; $s['attempts']=0;
+            $s['step']='subscription'; $s['prompt']=implode(' ', $parts).''; $s['attempts']=0;
             return gather($c,$id,$s['prompt']);
         case 'subscription':
             $i=(int)$digit-1; if (!ctype_digit($digit) || !isset($s['subscriptions'][$i])) break;
             $sub=$s['subscriptions'][$i]; $s['subscription']=$sub['id'];
             $s['step']='subscription_menu'; $s['attempts']=0;
-            $s['prompt']='This subscription is '.($sub['status'] ?? 'unknown').'. It ends '.($sub['end'] ?? 'on an unavailable date').'. Auto renew is '.(!empty($sub['auto_renew'])?'on':'off').'. Press 1 to change auto renew. Press 2 for the office. Press 3 for the main menu. Press 4 to get a renewal quote. Press 5 to change the saved card on this subscription. Press 6 to change a delivery address field. Press 9 to end the call.';
+            $s['prompt']='This subscription is '.($sub['status'] ?? 'unknown').'. It ends '.($sub['end'] ?? 'on an unavailable date').'. Auto renew is '.(!empty($sub['auto_renew'])?'on':'off').'. Press 1 to change auto renew. Press 2 for the office. Press 3 for the main menu. Press 4 to get a renewal quote. Press 5 to change the saved card on this subscription. Press 6 to change a delivery address field.';
             return gather($c,$id,$s['prompt']);
         case 'subscription_menu':
             if ($digit === '6') {
                 if (strtolower($c['ENABLE_ACCOUNT_CHANGES'] ?? 'false') !== 'true') return endCall($c,$s,'Address changes are not available through this system. Please hold for the office.',true);
                 $s['step']='address_change'; $s['attempts']=0;
-                $s['prompt']='Press 1 for street address. Press 2 for apartment. Press 3 for city. Press 4 for state. Press 5 for ZIP code. Press 9 to end the call.';
+                $s['prompt']='Press 1 for street address. Press 2 for apartment. Press 3 for city. Press 4 for state. Press 5 for ZIP code.';
                 return gather($c,$id,$s['prompt']);
             }
             if ($digit === '5') return cardMenu($c,$id,$s,'subscription');
@@ -248,7 +248,7 @@ function processCallCore(array $c, string $id, array &$s, array $request, ?calla
                 return gather($c,$id,$s['prompt']);
             }
             if ($digit !== '1') break;
-            $s['step']='auto_renew'; $s['attempts']=0; $s['prompt']='Press 1 to turn auto renew on. Press 2 to turn it off. Press 3 to go back. Press 9 to end the call.';
+            $s['step']='auto_renew'; $s['attempts']=0; $s['prompt']='Press 1 to turn auto renew on. Press 2 to turn it off. Press 3 to go back.';
             return gather($c,$id,$s['prompt']);
         case 'profile_change':
             $fields=['1'=>['name','name',false], '2'=>['email','email address',false], '3'=>['phone','primary phone number',true], '4'=>['secondary_phone','secondary phone number',true]];
