@@ -12,7 +12,7 @@ function config(): array {
             $c[trim($key)] = trim(trim($value), "\"'");
         }
     }
-    foreach (['DV_API_BASE_URL','DV_API_KEY','ENABLE_RENEWALS','WEBRESPONDER_KEY','WEBRESPONDER_URL','OFFICE_DESTINATION','STATE_DIR','LOG_DIR','CALLER_ID_DIGIT_STYLE','TTS_VOICE','TTS_LANGUAGE','INPUT_TIMEOUT_SECONDS','INTERDIGIT_TIMEOUT_SECONDS','MAX_ATTEMPTS','LOG_LEVEL','LOG_RETENTION_DAYS'] as $key) {
+    foreach (['DV_API_BASE_URL','DV_API_KEY','ENABLE_RENEWALS','ENABLE_ACCOUNT_CHANGES','WEBRESPONDER_KEY','WEBRESPONDER_URL','OFFICE_DESTINATION','STATE_DIR','LOG_DIR','CALLER_ID_DIGIT_STYLE','TTS_VOICE','TTS_LANGUAGE','INPUT_TIMEOUT_SECONDS','INTERDIGIT_TIMEOUT_SECONDS','MAX_ATTEMPTS','LOG_LEVEL','LOG_RETENTION_DAYS'] as $key) {
         $value = getenv($key); if ($value !== false) $c[$key] = $value;
     }
     return $c + ['DV_API_BASE_URL'=>'https://dev.deevoch.com/api/phone/v1','CALLER_ID_DIGIT_STYLE'=>'words','INPUT_TIMEOUT_SECONDS'=>'6','INTERDIGIT_TIMEOUT_SECONDS'=>'5','MAX_ATTEMPTS'=>'3','LOG_LEVEL'=>'info','LOG_RETENTION_DAYS'=>'30'];
@@ -53,6 +53,16 @@ function callback(array $c, string $id): string { return $c['WEBRESPONDER_URL'].
 function gather(array $c, string $id, string $text, int $digits = 1): string {
     return '<Gather input="dtmf" numDigits="'.$digits.'" timeout="'.bounded($c,'INPUT_TIMEOUT_SECONDS',6,1,60).'" digitEndTimeout="'.bounded($c,'INTERDIGIT_TIMEOUT_SECONDS',5,1,30).'" action="'.esc(callback($c,$id)).'">'.say($c,$text).'</Gather>';
 }
+function gatherSpeech(array $c, string $id, string $text): string {
+    return '<Gather input="speech" language="en-US" timeout="'.bounded($c,'INPUT_TIMEOUT_SECONDS',6,1,60).'" action="'.esc(callback($c,$id)).'">'.say($c,$text).'</Gather>';
+}
+function beginChange(array $c, string $id, array &$s, string $target, string $field, string $label, bool $numeric = false): string {
+    $s['change_target']=$target; $s['change_field']=$field; $s['change_label']=$label;
+    $s['change_numeric']=$numeric; $s['step']='change_input'; $s['attempts']=0;
+    $s['digits']=$numeric ? ($field === 'zip' ? 5 : 10) : 1;
+    $s['prompt']=($numeric ? 'Enter' : 'Say').' the new '.$label.'.';
+    return $numeric ? gather($c,$id,$s['prompt'],$s['digits']) : gatherSpeech($c,$id,$s['prompt']);
+}
 function outputXml(string $body): void { header('Content-Type: application/xml; charset=utf-8'); header('Cache-Control: no-store'); echo '<?xml version="1.0" encoding="UTF-8"?><Response>'.$body.'</Response>'; }
 function sipDestination(string $destination, string $domain): ?string {
     // Restrict both parts to dial-plan-safe identifiers; never accept a full SIP URI.
@@ -75,7 +85,7 @@ function failApi(array $c, array &$s, array $result): string {
 }
 function mainMenu(array $c, string $id, array &$s, string $prefix = ''): string {
     $s['step']='menu'; $s['attempts']=0; $s['digits']=1;
-    $s['prompt']=$prefix.' Press 1 to hear your subscriptions. Press 2 for the office. Press 3 to review or delete saved cards. Press 4 to hear your account details. Press 9 to end the call.';
+    $s['prompt']=$prefix.' Press 1 to hear your subscriptions. Press 2 for the office. Press 3 to review or delete saved cards. Press 4 to hear your account details. Press 5 to change account details. Press 9 to end the call.';
     return gather($c,$id,$s['prompt']);
 }
 function cardMenu(array $c, string $id, array &$s, string $purpose): string {
@@ -94,12 +104,13 @@ function processCall(array $c, string $id, array &$s, array $request, ?callable 
     $digit = (string)($request['Digits'] ?? '');
     $step = $s['step'] ?? 'start';
     if (!empty($s['ended'])) return '<Hangup/>';
-    if ($step !== 'start' && $digit === '') {
+    $speech = trim((string)($request['SpeechResult'] ?? ''));
+    if ($step !== 'start' && $digit === '' && !($step === 'change_input' && $speech !== '')) {
         $s['attempts'] = ($s['attempts'] ?? 0) + 1;
         if ($s['attempts'] >= bounded($c,'MAX_ATTEMPTS',3,1,10)) return endCall($c,$s,'We did not receive a response. Goodbye.');
-        return gather($c,$id,$s['prompt'] ?? 'Please enter your selection.', (int)($s['digits'] ?? 1));
+        return ($step === 'change_input' && empty($s['change_numeric'])) ? gatherSpeech($c,$id,$s['prompt']) : gather($c,$id,$s['prompt'] ?? 'Please enter your selection.', (int)($s['digits'] ?? 1));
     }
-    if ($step !== 'start' && $digit === '9' && !in_array($step,['code','phone'],true)) return endCall($c,$s,'Goodbye.');
+    if ($step !== 'start' && $digit === '9' && !in_array($step,['code','phone','change_input'],true)) return endCall($c,$s,'Goodbye.');
     switch ($step) {
         case 'start':
             if (isset($request['destination'])) {
@@ -143,6 +154,12 @@ function processCall(array $c, string $id, array &$s, array $request, ?callable 
             $i=(int)$digit-1; if (!ctype_digit($digit) || !isset($s['customers'][$i])) break;
             $s['customer']=$s['customers'][$i]['id']; return mainMenu($c,$id,$s);
         case 'menu':
+            if ($digit === '5') {
+                if (strtolower($c['ENABLE_ACCOUNT_CHANGES'] ?? 'false') !== 'true') return endCall($c,$s,'Account changes are not available through this system. Please hold for the office.',true);
+                $s['step']='profile_change'; $s['attempts']=0;
+                $s['prompt']='Press 1 to change your name. Press 2 to change your email. Press 3 to change your primary phone. Press 4 to change your secondary phone. Press 5 to turn the newsletter on. Press 6 to turn it off. Press 9 to end the call.';
+                return gather($c,$id,$s['prompt']);
+            }
             if ($digit === '2') return endCall($c,$s,'Please hold for the office.',true);
             if ($digit === '3') return cardMenu($c,$id,$s,'delete');
             if ($digit === '4') {
@@ -164,9 +181,15 @@ function processCall(array $c, string $id, array &$s, array $request, ?callable 
             $i=(int)$digit-1; if (!ctype_digit($digit) || !isset($s['subscriptions'][$i])) break;
             $sub=$s['subscriptions'][$i]; $s['subscription']=$sub['id'];
             $s['step']='subscription_menu'; $s['attempts']=0;
-            $s['prompt']='This subscription is '.($sub['status'] ?? 'unknown').'. It ends '.($sub['end'] ?? 'on an unavailable date').'. Auto renew is '.(!empty($sub['auto_renew'])?'on':'off').'. Press 1 to change auto renew. Press 2 for the office. Press 3 for the main menu. Press 4 to get a renewal quote. Press 5 to change the saved card on this subscription. Press 9 to end the call.';
+            $s['prompt']='This subscription is '.($sub['status'] ?? 'unknown').'. It ends '.($sub['end'] ?? 'on an unavailable date').'. Auto renew is '.(!empty($sub['auto_renew'])?'on':'off').'. Press 1 to change auto renew. Press 2 for the office. Press 3 for the main menu. Press 4 to get a renewal quote. Press 5 to change the saved card on this subscription. Press 6 to change a delivery address field. Press 9 to end the call.';
             return gather($c,$id,$s['prompt']);
         case 'subscription_menu':
+            if ($digit === '6') {
+                if (strtolower($c['ENABLE_ACCOUNT_CHANGES'] ?? 'false') !== 'true') return endCall($c,$s,'Address changes are not available through this system. Please hold for the office.',true);
+                $s['step']='address_change'; $s['attempts']=0;
+                $s['prompt']='Press 1 for street address. Press 2 for apartment. Press 3 for city. Press 4 for state. Press 5 for ZIP code. Press 9 to end the call.';
+                return gather($c,$id,$s['prompt']);
+            }
             if ($digit === '5') return cardMenu($c,$id,$s,'subscription');
             if ($digit === '2') return endCall($c,$s,'Please hold for the office.',true);
             if ($digit === '3') return mainMenu($c,$id,$s);
@@ -184,6 +207,47 @@ function processCall(array $c, string $id, array &$s, array $request, ?callable 
             if ($digit !== '1') break;
             $s['step']='auto_renew'; $s['attempts']=0; $s['prompt']='Press 1 to turn auto renew on. Press 2 to turn it off. Press 3 to go back. Press 9 to end the call.';
             return gather($c,$id,$s['prompt']);
+        case 'profile_change':
+            $fields=['1'=>['name','name',false], '2'=>['email','email address',false], '3'=>['phone','primary phone number',true], '4'=>['secondary_phone','secondary phone number',true]];
+            if (isset($fields[$digit])) return beginChange($c,$id,$s,'profile',...$fields[$digit]);
+            if ($digit === '5' || $digit === '6') {
+                $s['change_target']='profile'; $s['change_field']='newsletter'; $s['change_value']=$digit === '5';
+                $s['step']='change_confirm'; $s['attempts']=0;
+                $s['prompt']='Turn the newsletter '.($s['change_value']?'on':'off').'. Press 1 to confirm or 2 to cancel.';
+                return gather($c,$id,$s['prompt']);
+            }
+            break;
+        case 'address_change':
+            $fields=['1'=>['address_line_1','street address',false], '2'=>['address_line_2','apartment',false], '3'=>['city','city',false], '4'=>['state','state',false], '5'=>['zip','ZIP code',true]];
+            if (isset($fields[$digit])) return beginChange($c,$id,$s,'delivery',...$fields[$digit]);
+            break;
+        case 'change_input':
+            $value=!empty($s['change_numeric']) ? $digit : $speech;
+            $field=$s['change_field'];
+            $valid = $value !== '' && strlen($value) <= 150 && !preg_match('/[\x00-\x1F\x7F]/', $value);
+            if ($field === 'zip') $valid = (bool)preg_match('/^\d{5}$/D',$value);
+            if ($field === 'phone' || $field === 'secondary_phone') $valid = (bool)preg_match('/^\d{10}$/D',$value);
+            if ($field === 'email') $valid = (bool)filter_var($value,FILTER_VALIDATE_EMAIL);
+            if (!$valid) {
+                $s['attempts']=($s['attempts']??0)+1;
+                if ($s['attempts'] >= bounded($c,'MAX_ATTEMPTS',3,1,10)) return endCall($c,$s,'We could not understand the entry. Please hold for the office.',true);
+                $prompt='That entry was not valid. '.$s['prompt'];
+                return !empty($s['change_numeric']) ? gather($c,$id,$prompt,$s['digits']) : gatherSpeech($c,$id,$prompt);
+            }
+            $s['change_value']=$value; $s['step']='change_confirm'; $s['attempts']=0; $s['digits']=1;
+            $readback=!empty($s['change_numeric']) ? spokenPhone($value,$c['CALLER_ID_DIGIT_STYLE']) : $value;
+            $s['prompt']='You entered '.$readback.' for '.$s['change_label'].'. Press 1 to confirm this change or 2 to cancel.';
+            return gather($c,$id,$s['prompt']);
+        case 'change_confirm':
+            if ($digit === '2') return mainMenu($c,$id,$s,'No change was made.');
+            if ($digit !== '1') break;
+            $body=[$s['change_field']=>$s['change_value']];
+            $path='/customers/'.(int)$s['customer'];
+            if ($s['change_target'] === 'delivery') { $body=['delivery'=>$body]; $path.='/subscriptions/'.(int)$s['subscription']; }
+            $r=api($c,'PATCH',$path,$body,$s['session']);
+            unset($s['change_value']);
+            if ($r['status'] !== 200) return failApi($c,$s,$r);
+            return mainMenu($c,$id,$s,'The change was saved. '.implode(' ',array_filter($r['warnings'] ?? [],'is_string')));
         case 'select_card':
             $i=(int)$digit-1;
             if (!ctype_digit($digit) || !isset($s['cards'][$i])) break;
