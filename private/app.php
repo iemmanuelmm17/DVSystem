@@ -57,10 +57,10 @@ function say(array $c, string $text): string {
 }
 function callback(array $c, string $id): string { return $c['WEBRESPONDER_URL'].'?'.http_build_query(['key'=>$c['WEBRESPONDER_KEY'],'state'=>$id], '', '&', PHP_QUERY_RFC3986); }
 function gather(array $c, string $id, string $text, int $digits = 1): string {
-    return '<Gather input="dtmf" numDigits="'.$digits.'" timeout="'.bounded($c,'INPUT_TIMEOUT_SECONDS',6,1,60).'" digitEndTimeout="'.bounded($c,'INTERDIGIT_TIMEOUT_SECONDS',5,1,30).'" action="'.esc(callback($c,$id)).'">'.say($c,$text).'</Gather>';
+    return '<Gather input="dtmf" numDigits="'.$digits.'" timeout="'.bounded($c,'INPUT_TIMEOUT_SECONDS',6,1,60).'" digitEndTimeout="'.bounded($c,'INTERDIGIT_TIMEOUT_SECONDS',5,1,30).'" action="'.esc(callback($c,$id)).'">'.say($c,$text.' Press star to repeat. Press pound to go back.').'</Gather>';
 }
 function gatherSpeech(array $c, string $id, string $text): string {
-    return '<Gather input="speech" language="en-US" timeout="'.bounded($c,'INPUT_TIMEOUT_SECONDS',6,1,60).'" action="'.esc(callback($c,$id)).'">'.say($c,$text).'</Gather>';
+    return '<Gather input="dtmf speech" numDigits="1" language="en-US" timeout="'.bounded($c,'INPUT_TIMEOUT_SECONDS',6,1,60).'" action="'.esc(callback($c,$id)).'">'.say($c,$text.' Press star to repeat. Press pound to go back.').'</Gather>';
 }
 function beginChange(array $c, string $id, array &$s, string $target, string $field, string $label, bool $numeric = false): string {
     $s['change_target']=$target; $s['change_field']=$field; $s['change_label']=$label;
@@ -106,7 +106,41 @@ function cardMenu(array $c, string $id, array &$s, string $purpose): string {
     $s['prompt']=implode(' ', $parts).' Press 9 to end the call.';
     return gather($c,$id,$s['prompt']);
 }
+function promptSnapshot(array $s): array {
+    $keys=['step','prompt','digits','customer','subscriptions','subscription','cards','card_purpose','selected_card','renewal_quote','renew_auto','desired_auto_renew','change_target','change_field','change_label','change_numeric','change_value'];
+    return array_intersect_key($s,array_flip($keys));
+}
+function repeatPrompt(array $c, string $id, array &$s, string $prefix = ''): string {
+    $s['attempts']=0;
+    $prompt=$prefix.($s['prompt'] ?? 'Please make a selection.');
+    return (($s['step'] ?? '') === 'change_input' && empty($s['change_numeric'])) ? gatherSpeech($c,$id,$prompt) : gather($c,$id,$prompt,(int)($s['digits'] ?? 1));
+}
 function processCall(array $c, string $id, array &$s, array $request, ?callable $checkpoint = null): string {
+    $step=$s['step'] ?? 'start'; $digit=(string)($request['Digits'] ?? '');
+    if (empty($s['ended']) && $step !== 'start' && $step !== 'renew_uncertain' && ($digit === '*' || $digit === '#')) {
+        if ($digit === '*') return repeatPrompt($c,$id,$s);
+        $history=$s['history'] ?? [];
+        if (!$history) return repeatPrompt($c,$id,$s,'There is no previous menu. ');
+        $previous=array_pop($history);
+        foreach (array_keys(promptSnapshot($s)) as $key) unset($s[$key]);
+        foreach ($previous as $key=>$value) $s[$key]=$value;
+        $s['history']=$history;
+        return repeatPrompt($c,$id,$s);
+    }
+    $before=promptSnapshot($s);
+    $hadSession=!empty($s['session']);
+    $body=processCallCore($c,$id,$s,$request,$checkpoint);
+    $after=$s['step'] ?? 'start';
+    // Never return to a verification or transaction confirmation after it completes.
+    if ((!$hadSession && !empty($s['session'])) || in_array($step,['renew_confirm','confirm_card','change_confirm','confirm_auto'],true) && $after !== $step) {
+        $s['history']=[];
+    } elseif (empty($s['ended']) && $after !== $step && isset($before['prompt']) && $after !== 'renew_uncertain') {
+        $s['history'][]=$before;
+        $s['history']=array_slice($s['history'],-12);
+    }
+    return $body;
+}
+function processCallCore(array $c, string $id, array &$s, array $request, ?callable $checkpoint = null): string {
     $digit = (string)($request['Digits'] ?? '');
     $step = $s['step'] ?? 'start';
     if (!empty($s['ended'])) return '<Hangup/>';
